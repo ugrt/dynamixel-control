@@ -11,7 +11,7 @@ from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
 
-DEVICENAME = "/dev/ttyUSB0"
+DEVICE_PORT = "/dev/ttyUSB0"
 BAUDRATE = 57600
 PROTOCOL_VERSION = 2.0
 
@@ -42,7 +42,7 @@ class DynamixelTeleop(Node):
         )
 
         # Setup Dynamixel
-        self.port_handler = PortHandler(DEVICENAME)
+        self.port_handler = PortHandler(DEVICE_PORT)
         self.packet_handler = PacketHandler(PROTOCOL_VERSION)
 
         if not self.port_handler.openPort():
