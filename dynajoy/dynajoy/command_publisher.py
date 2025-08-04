@@ -4,15 +4,19 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
-from dynamixel_sdk import *
 from enum import Enum
 from numpy import interp
+
+from dynamixel_sdk import COMM_SUCCESS
+from dynamixel_sdk import PacketHandler
+from dynamixel_sdk import PortHandler
 
 DEVICENAME = "/dev/ttyUSB0"
 BAUDRATE = 57600
 PROTOCOL_VERSION = 2.0
 
-DXL_ID = 1
+WRIST1_ID = 5
+WRIST2_ID = 4
 ADDR_GOAL_VELOCITY = 104
 ADDR_TORQUE_ENABLE = 64
 ADDR_PRESENT_POSITION = 132
@@ -22,6 +26,8 @@ TORQUE_ENABLE = 1
 TORQUE_DISABLE = 0
 
 MAX_VELOCITY = 300  # Adjust to your motor limits
+MIN_POSITION=0
+MAX_POSITION = 4095
 
 class DynamixelTeleop(Node):
     def __init__(self):
@@ -30,7 +36,7 @@ class DynamixelTeleop(Node):
         # Setup Joystick
         self.joy_sub = self.create_subscription(
             Joy,
-            'joy',
+            '/joy',
             self.joy_callback,
             10
         )
@@ -47,7 +53,10 @@ class DynamixelTeleop(Node):
             return
 
         dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
-            self.port_handler, DXL_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
+            self.port_handler, WRIST1_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
+        )
+        dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
+            self.port_handler, WRIST2_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
         )
         if dxl_comm_result != COMM_SUCCESS:
             self.get_logger().error(f"Enable torque failed: {self.packet_handler.getTxRxResult(dxl_comm_result)}")
@@ -60,11 +69,16 @@ class DynamixelTeleop(Node):
         x_axis = joy_msg.axes[0]  # Left/right
         y_axis = -joy_msg.axes[1]  # Forward/backward
 
-        velocity = int(y_axis * MAX_VELOCITY)
+        # TODO: Gotta do math stuff so wrist motors move properly
+        position_wrist1 = int(interp(y_axis, [-1, 1], [MIN_POSITION, MAX_POSITION]))
+        position_wrist2 = int(interp(y_axis, [-1, 1], [MIN_POSITION, MAX_POSITION]))
 
         # Write velocity to motor
         dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
-            self.port_handler, DXL_ID, ADDR_GOAL_VELOCITY, self._to_twos_complement(velocity, 4)
+            self.port_handler, WRIST1_ID, ADDR_GOAL_POSITION, self._to_twos_complement(position_wrist1, 4)
+        )
+        dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
+            self.port_handler, WRIST2_ID, ADDR_GOAL_POSITION, self._to_twos_complement(position_wrist2, 4)
         )
 
         if dxl_comm_result != COMM_SUCCESS:
@@ -72,7 +86,8 @@ class DynamixelTeleop(Node):
         elif dxl_error != 0:
             self.get_logger().error(f"Dynamixel error: {self.packet_handler.getRxPacketError(dxl_error)}")
         else:
-            self.get_logger().info(f"Velocity Command Sent: {velocity}")
+            self.get_logger().info(f"Position Command Sent for Wrist 1: {position_wrist1}")
+            self.get_logger().info(f"Position Command Sent for Wrist 2: {position_wrist2}")
 
     def _to_twos_complement(self, value, byte_size):
         max_val = 2 ** (byte_size * 8)
