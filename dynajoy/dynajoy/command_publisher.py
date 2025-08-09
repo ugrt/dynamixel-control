@@ -11,7 +11,7 @@ from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
 
-DEVICE_PORT = "/dev/ttyUSB0"
+DEVICE_PORT = "/dev/bus/usb/001/002"
 BAUDRATE = 57600
 PROTOCOL_VERSION = 2.0
 
