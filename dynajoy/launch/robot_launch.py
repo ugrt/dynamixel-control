@@ -38,6 +38,19 @@ def generate_launch_description():
 				('/joy', '/controller1/joy'),
 			]
 		),
+		Node(
+			package='dynajoy',
+			executable='grip_control',
+			name='grip_control',
+			parameters=[
+				{'controller_id': 1},  # e.g., /dev/input/js1
+				{'deadzone': deadzone},
+				{'sensitivity': sensitivity}
+			],
+			remappings=[
+				('/joy', '/controller1/joy'),
+			]
+		),
 	])
 
 #def generate_launch_description():
