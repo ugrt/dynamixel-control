@@ -1,0 +1,33 @@
+# ── ABB IRB 120 analysis (separate repo, kept local only) ──────────────────
+ABB-IRB-120-Robotics-motion-analysis/
+
+# ── Claude Code configuration ───────────────────────────────────────────────
+.claude/
+CLAUDE.md
+*.claude
+
+# ── Python build / cache ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── ROS 2 build artifacts ────────────────────────────────────────────────────
+install/
+log/
+.colcon_install_layout
+
+# ── Environment ─────────────────────────────────────────────────────────────
+.env
+.venv
+venv/
+
+# ── Editor / OS ─────────────────────────────────────────────────────────────
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

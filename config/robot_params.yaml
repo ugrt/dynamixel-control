@@ -1,0 +1,42 @@
+# ============================================================
+#  Dynamixel Arm — ROS 2 Node Parameters
+#
+#  Pass to the node at launch:
+#    parameters=[robot_params.yaml]
+#
+#  Inspect / change at runtime:
+#    ros2 param list /command_publisher
+#    ros2 param get  /command_publisher arm.L1
+#    ros2 param set  /command_publisher arm.L1 450.0
+# ============================================================
+
+command_publisher:
+  ros__parameters:
+
+    # ── Physical arm geometry (mm) ──────────────────────────
+    arm.L1:          437.0   # shoulder pivot → elbow pivot
+    arm.L2:          437.0   # elbow pivot   → wrist pivot
+    arm.L3:          220.0   # wrist pivot   → gripper tip
+    arm.base_height: 123.0   # frame surface → shoulder pivot (vertical)
+
+    # ── Joint limits (radians) ──────────────────────────────
+    joint.shoulder_min: -3.1416   # -π
+    joint.shoulder_max:  3.1416   #  π
+    joint.elbow_min:    -1.5708   # -π/2  (restricted: avoid self-collision)
+    joint.elbow_max:     3.1416   #  π
+    joint.wrist_min:    -3.1416   # -π
+    joint.wrist_max:     3.1416   #  π
+
+    # ── Dynamixel encoder (XL430-W250 / compatible) ─────────
+    enc.counts_per_rev:   4096   # counts per 360°
+    enc.position_neutral: 1750   # count at 0 rad (home)
+    enc.min_position:        0   # software lower limit
+    enc.max_position:     3500   # software upper limit
+
+    # ── IK behaviour ─────────────────────────────────────────
+    ik.step_mm: 5.0   # mm per callback at full stick deflection
+
+    # ── Device / comms ───────────────────────────────────────
+    device.port:      "/dev/ttyUSB0"
+    device.baudrate:  57600
+    device.protocol:  2.0
