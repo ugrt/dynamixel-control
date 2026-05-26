@@ -1,5 +1,10 @@
 # ============================================================
-#  Dynamixel Arm — ROS 2 Node Parameters
+#  6-DOF Arm — ROS 2 Node Parameters
+#
+#  Hardware split
+#    ODrive S1 (CAN)  : base rotation, shoulder, elbow
+#    Dynamixel XM540  : wrist pitch (W270-R), wrist spin (W270-R),
+#                       gripper (W150-R)
 #
 #  Pass to the node at launch:
 #    parameters=[robot_params.yaml]
@@ -7,36 +12,63 @@
 #  Inspect / change at runtime:
 #    ros2 param list /command_publisher
 #    ros2 param get  /command_publisher arm.L1
-#    ros2 param set  /command_publisher arm.L1 450.0
+#    ros2 param set  /command_publisher ik.step_mm 8.0
 # ============================================================
 
 command_publisher:
   ros__parameters:
 
-    # ── Physical arm geometry (mm) ──────────────────────────
+    # ── Physical arm geometry (mm) ──────────────────────────────────────────
     arm.L1:          437.0   # shoulder pivot → elbow pivot
     arm.L2:          437.0   # elbow pivot   → wrist pivot
     arm.L3:          220.0   # wrist pivot   → gripper tip
     arm.base_height: 123.0   # frame surface → shoulder pivot (vertical)
 
-    # ── Joint limits (radians) ──────────────────────────────
-    joint.shoulder_min: -3.1416   # -π
-    joint.shoulder_max:  3.1416   #  π
-    joint.elbow_min:    -1.5708   # -π/2  (restricted: avoid self-collision)
-    joint.elbow_max:     3.1416   #  π
-    joint.wrist_min:    -3.1416   # -π
-    joint.wrist_max:     3.1416   #  π
+    # ── ODrive joint limits (radians) ────────────────────────────────────────
+    joint.base_min:      -3.1416   # −π  (full rotation)
+    joint.base_max:       3.1416   #  π
+    joint.shoulder_min:  -1.5708   # −π/2  (horizontal = 0, below = negative)
+    joint.shoulder_max:   3.1416   #  π
+    joint.elbow_min:     -3.1416   # −π
+    joint.elbow_max:      3.1416   #  π
 
-    # ── Dynamixel encoder (XL430-W250 / compatible) ─────────
-    enc.counts_per_rev:   4096   # counts per 360°
-    enc.position_neutral: 1750   # count at 0 rad (home)
-    enc.min_position:        0   # software lower limit
-    enc.max_position:     3500   # software upper limit
+    # ── Dynamixel joint limits (radians) ─────────────────────────────────────
+    joint.wrist_pitch_min: -1.5708   # −90°
+    joint.wrist_pitch_max:  1.5708   #  90°
+    joint.wrist_spin_min:  -3.1416   # −180°
+    joint.wrist_spin_max:   3.1416   #  180°
+    joint.gripper_min:      0.0      # fully open
+    joint.gripper_max:      1.5708   # fully closed (~90°)
 
-    # ── IK behaviour ─────────────────────────────────────────
-    ik.step_mm: 5.0   # mm per callback at full stick deflection
+    # ── Dynamixel XM540 encoder (W150-R, W270-R) ─────────────────────────────
+    # Single-turn position mode: 0–4095 counts, 4096 counts/revolution.
+    # Neutral = 2048 = 0 rad (centre of travel).
+    enc.counts_per_rev:   4096
+    enc.position_neutral: 2048
+    enc.min_position:        0
+    enc.max_position:     4095
 
-    # ── Device / comms ───────────────────────────────────────
-    device.port:      "/dev/ttyUSB0"
-    device.baudrate:  57600
-    device.protocol:  2.0
+    # ── Dynamixel motor IDs ────────────────────────────────────────────────
+    # Set these in Dynamixel Wizard to match your physical motors.
+    dxl.wrist_pitch_id: 1   # XM540-W270-R  wrist up/down
+    dxl.wrist_spin_id:  2   # XM540-W270-R  spin wrist
+    dxl.gripper_id:     3   # XM540-W150-R  gripper open/close
+
+    # ── ODrive CAN bus ─────────────────────────────────────────────────────
+    # Ensure the SocketCAN interface is up before launch:
+    #   sudo ip link set can0 up type can bitrate 250000
+    odrive.can_channel:      "can0"
+    odrive.can_bitrate:      250000   # must match ODrive firmware setting
+    odrive.base_node_id:     0        # set in ODrive's <odrv>.axis0.config.can.node_id
+    odrive.shoulder_node_id: 1
+    odrive.elbow_node_id:    2
+
+    # ── IK / velocity control behaviour ──────────────────────────────────────
+    ik.step_mm:    5.0    # mm per callback at full stick (IK Cartesian mode)
+    ik.step_rad:   0.05   # rad per callback for wrist / base increments
+    vel.step_rad:  0.03   # rad per callback for ODrive incremental position
+
+    # ── Dynamixel device / comms ──────────────────────────────────────────────
+    device.port:     "/dev/ttyUSB0"
+    device.baudrate: 57600
+    device.protocol: 2.0

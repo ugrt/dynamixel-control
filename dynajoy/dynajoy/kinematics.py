@@ -1,95 +1,128 @@
 """
-Kinematics for Dynamixel Robot Arm
-====================================
+Kinematics for 6-DOF Dynamixel / ODrive Robot Arm
+===================================================
 Pure-math library — no file I/O, no ROS imports.
 All geometry lives in ArmConfig; the ROS node owns parameter loading.
 
 Usage
 -----
-  from dynajoy.kinematics import ArmConfig, ArmKinematics
+::
 
-  cfg = ArmConfig(L1=437.0, L2=437.0, L3=220.0, base_height=123.0)
-  kin = ArmKinematics(cfg)
+    from dynajoy.kinematics import ArmConfig, ArmKinematics
 
-  x, y, phi, T = kin.forward_kinematics(theta1, theta2, theta3)
-  result       = kin.inverse_kinematics(x_target, y_target)
+    cfg = ArmConfig(L1=437.0, L2=437.0, L3=220.0, base_height=123.0)
+    kin = ArmKinematics(cfg)
+
+    # 3-D forward kinematics
+    x, y, z, phi = kin.forward_kinematics_3d(theta0, theta1, theta2, theta3)
+
+    # 3-D inverse kinematics
+    result = kin.inverse_kinematics_3d(x, y, z, phi_arm=0.0)
 
 Arm structure
 -------------
-  ┌──────────────┬──────────────────────────────────────────────┐
-  │  Joint       │  Actuator(s)                                 │
-  ├──────────────┼──────────────────────────────────────────────┤
-  │  Shoulder    │  SHOULDER1 (ID 1) + SHOULDER2 (ID 2)         │
-  │  Elbow       │  ELBOW (ID 3)                                │
-  │  Wrist       │  WRIST1 (ID 5) + WRIST2 (ID 4)              │
-  └──────────────┴──────────────────────────────────────────────┘
+  ┌──────────────────┬──────────┬────────────────────────────┐
+  │  Joint           │  Driver  │  Actuator                  │
+  ├──────────────────┼──────────┼────────────────────────────┤
+  │  Base rotation   │  ODrive  │  S1  (CAN node 0)          │
+  │  Shoulder        │  ODrive  │  S1  (CAN node 1)          │
+  │  Elbow           │  ODrive  │  S1  (CAN node 2)          │
+  │  Wrist pitch     │  Dynamixel│  XM540-W270-R             │
+  │  Wrist spin      │  Dynamixel│  XM540-W270-R             │
+  │  Gripper         │  Dynamixel│  XM540-W150-R             │
+  └──────────────────┴──────────┴────────────────────────────┘
 
-Coordinate frame (world origin = frame surface)
-  X → horizontal reach away from base
-  Y ↑ vertical height above frame
+Coordinate frame (world origin = frame surface centre)
+  X  →  forward (arm points here when θ₀ = 0)
+  Y  →  left
+  Z  ↑  vertical
+
+Joint angle convention
+  θ₀  Base rotation around Z.  0 = arm extends along +X.
+  θ₁  Shoulder pitch.          0 = arm horizontal.  + = upward.
+  θ₂  Elbow.                   0 = straight.         + = elbow folds up.
+  θ₃  Wrist pitch (in-plane).  0 = wrist straight.   + = pitch up.
+  θ₄  Wrist spin (roll).       0 = neutral.
+  φ   Gripper.                 0 = fully open.        + = closing.
 
 Physical dimensions (from design diagram)
   L1 = 437 mm   shoulder pivot → elbow pivot
   L2 = 437 mm   elbow pivot   → wrist pivot
   L3 = 220 mm   wrist pivot   → gripper tip
-  base_height = 123 mm  frame → shoulder pivot
-
-Relationship to ABB IRB 120 analysis
-  dh_matrix()          identical formula to ABB dh()
-  inverse_kinematics() same 2R law-of-cosines as ABB ik_2d_planar(),
-                       extended to 3 joints via wrist decoupling
+  base_height = 123 mm  frame surface → shoulder pivot
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+
+from dataclasses import dataclass
 import math
 import numpy as np
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuration dataclass  (populated by the ROS node from ROS params)
+# ArmConfig  (populated by the ROS node from ROS params)
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ArmConfig:
     """
-    All geometric and encoder constants for the arm.
+    All geometric and encoder constants for the 6-DOF arm.
 
-    Default values match the physical design diagram.
-    The ROS node reads these from robot_params.yaml via the ROS 2
-    parameter server and passes them here — no file I/O in this module.
+    ODrive joints (base, shoulder, elbow) operate in radians natively.
+    Dynamixel joints (wrist_pitch, wrist_spin, gripper) need count ↔ rad
+    conversion via the dxl_* encoder fields.
     """
+
     # ── Link lengths (mm) ────────────────────────────────────────────────────
-    L1: float = 437.0          # shoulder pivot → elbow pivot
-    L2: float = 437.0          # elbow pivot   → wrist pivot
-    L3: float = 220.0          # wrist pivot   → gripper tip
+    L1: float = 437.0           # shoulder pivot → elbow pivot
+    L2: float = 437.0           # elbow pivot   → wrist pivot
+    L3: float = 220.0           # wrist pivot   → gripper tip
     base_height: float = 123.0  # frame surface → shoulder pivot
 
-    # ── Joint limits (rad) ───────────────────────────────────────────────────
-    shoulder_min: float = -math.pi
-    shoulder_max: float =  math.pi
-    elbow_min:    float = -math.pi / 2   # restricted to avoid self-collision
-    elbow_max:    float =  math.pi
-    wrist_min:    float = -math.pi
-    wrist_max:    float =  math.pi
+    # ── ODrive joint limits (rad) ────────────────────────────────────────────
+    base_min:     float = -math.pi
+    base_max:     float =  math.pi
+    shoulder_min: float = -math.pi / 2   # −90°: prevents going below horizontal
+    shoulder_max: float =  math.pi       #  180°
+    elbow_min:    float = -math.pi       # −180°
+    elbow_max:    float =  math.pi       #  180°
 
-    # ── Encoder (XL430-W250 / compatible) ────────────────────────────────────
-    counts_per_rev:   int   = 4096
-    position_neutral: int   = 1750
-    min_position:     int   = 0
-    max_position:     int   = 3500
+    # ── Dynamixel joint limits (rad) ─────────────────────────────────────────
+    wrist_pitch_min: float = -math.pi / 2   # −90°
+    wrist_pitch_max: float =  math.pi / 2   #  90°
+    wrist_spin_min:  float = -math.pi       # −180°
+    wrist_spin_max:  float =  math.pi       #  180°
+    gripper_min:     float =  0.0           # fully open
+    gripper_max:     float =  math.pi / 2   # fully closed (~90°)
 
-    # ── IK control ───────────────────────────────────────────────────────────
-    ik_step_mm: float = 5.0    # mm per callback at full stick deflection
+    # ── Dynamixel XM540 encoder ──────────────────────────────────────────────
+    # Applies to wrist_pitch, wrist_spin, and gripper (all XM540 series).
+    # XM540 single-turn mode: 0–4095 counts, 4096 counts per revolution.
+    dxl_counts_per_rev:   int = 4096
+    dxl_position_neutral: int = 2048   # count at 0 rad (centre of range)
+    dxl_min_position:     int =    0
+    dxl_max_position:     int = 4095
+
+    # ── IK / teleoperation behaviour ─────────────────────────────────────────
+    ik_step_mm:  float = 5.0    # mm per callback at full stick deflection
+    ik_step_rad: float = 0.05   # rad per callback for wrist / base adjustments
+    vel_step_rad: float = 0.03  # rad per callback for ODrive velocity mode
+
+    # ── Computed helpers ─────────────────────────────────────────────────────
+    @property
+    def dxl_counts_per_rad(self) -> float:
+        return self.dxl_counts_per_rev / (2.0 * math.pi)
 
     @property
-    def counts_per_rad(self) -> float:
-        return self.counts_per_rev / (2.0 * math.pi)
-
-    @property
-    def joint_limits(self) -> list[tuple[float, float]]:
+    def kinematic_joint_limits(self) -> list[tuple[float, float]]:
+        """
+        Limits for the 4 position-controlled kinematic joints:
+        base, shoulder, elbow, wrist_pitch.
+        (wrist_spin and gripper are independent and not part of 3D IK.)
+        """
         return [
-            (self.shoulder_min, self.shoulder_max),
-            (self.elbow_min,    self.elbow_max),
-            (self.wrist_min,    self.wrist_max),
+            (self.base_min,        self.base_max),
+            (self.shoulder_min,    self.shoulder_max),
+            (self.elbow_min,       self.elbow_max),
+            (self.wrist_pitch_min, self.wrist_pitch_max),
         ]
 
 
@@ -100,11 +133,10 @@ def dh_matrix(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
     """
     Standard Denavit-Hartenberg transformation matrix.
 
-    Identical to the formulation used in the ABB IRB 120 analysis:
-        T = [[cos θ, -sin θ·cos α,  sin θ·sin α,  a·cos θ],
-             [sin θ,  cos θ·cos α, -cos θ·sin α,  a·sin θ],
-             [0,      sin α,        cos α,         d      ],
-             [0,      0,            0,             1      ]]
+    T = [[cos θ, −sin θ·cos α,  sin θ·sin α,  a·cos θ],
+         [sin θ,  cos θ·cos α, −cos θ·sin α,  a·sin θ],
+         [0,      sin α,        cos α,         d      ],
+         [0,      0,            0,             1      ]]
     """
     ct, st = math.cos(theta), math.sin(theta)
     ca, sa = math.cos(alpha), math.sin(alpha)
@@ -117,211 +149,286 @@ def dh_matrix(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ArmKinematics  — all math methods, config-aware
+# ArmKinematics
 # ─────────────────────────────────────────────────────────────────────────────
 class ArmKinematics:
     """
-    FK, IK, and encoder conversion for the 3R planar Dynamixel arm.
+    FK, IK, encoder conversion, and workspace sampling for the 6-DOF arm.
 
-    Instantiate once in the ROS node after reading parameters:
+    Instantiate once in the ROS node after reading parameters::
+
+        cfg      = ArmConfig(...)
         self.kin = ArmKinematics(cfg)
     """
 
     def __init__(self, cfg: ArmConfig):
         self.cfg = cfg
 
-    # ── Forward kinematics ────────────────────────────────────────────────────
-    def forward_kinematics(
+    # ── 3-D Forward kinematics ────────────────────────────────────────────────
+
+    def forward_kinematics_3d(
         self,
+        theta0: float,
         theta1: float,
         theta2: float,
         theta3: float,
-    ) -> tuple[float, float, float, np.ndarray]:
+        theta4: float = 0.0,
+    ) -> tuple[float, float, float, float]:
         """
-        End-effector pose in the world frame.
+        End-effector position in the world frame.
 
-        DH table (planar ⇒ d = 0, alpha = 0 for every joint):
-            Joint 1  [θ₁, 0, L1, 0]
-            Joint 2  [θ₂, 0, L2, 0]
-            Joint 3  [θ₃, 0, L3, 0]
+        The arm operates in a vertical plane whose direction is determined by
+        the base rotation θ₀.  Within that plane the kinematics reduce to a
+        standard 3R planar chain (shoulder + elbow + wrist-pitch).
 
-        T = T₁ · T₂ · T₃  (same accumulation as ABB analysis)
-        y_world = y_shoulder_frame + base_height
+        Reach in the arm plane::
+
+            r   = L1·cos θ₁ + L2·cos(θ₁+θ₂) + L3·cos(θ₁+θ₂+θ₃)
+            z_s = L1·sin θ₁ + L2·sin(θ₁+θ₂) + L3·sin(θ₁+θ₂+θ₃)
+
+        World frame::
+
+            x       = r · cos θ₀
+            y       = r · sin θ₀
+            z       = base_height + z_s
+            phi_arm = θ₁ + θ₂ + θ₃   (wrist orientation in arm plane)
+
+        Args:
+            theta0 : base rotation (rad)
+            theta1 : shoulder pitch (rad)
+            theta2 : elbow (rad)
+            theta3 : wrist pitch (rad)
+            theta4 : wrist spin (rad) — does not affect EE position
 
         Returns:
-            (x, y, phi, T)
-            x, y : end-effector position in world frame (mm)
-            phi  : orientation = θ₁+θ₂+θ₃ (rad)
-            T    : 4×4 homogeneous transform (shoulder frame)
+            (x, y, z, phi_arm)  — position in mm, phi_arm in rad
         """
         cfg = self.cfg
-        dh_table = [
-            (theta1, 0.0, cfg.L1, 0.0),
-            (theta2, 0.0, cfg.L2, 0.0),
-            (theta3, 0.0, cfg.L3, 0.0),
-        ]
-        T = np.eye(4)
-        for row in dh_table:
-            T = T @ dh_matrix(*row)
+        phi12  = theta1 + theta2
+        phi123 = phi12 + theta3
 
-        x   = T[0, 3]
-        y   = T[1, 3] + cfg.base_height
-        phi = theta1 + theta2 + theta3
-        return x, y, phi, T
+        reach = (
+            cfg.L1 * math.cos(theta1)
+            + cfg.L2 * math.cos(phi12)
+            + cfg.L3 * math.cos(phi123)
+        )
+        z = (
+            cfg.base_height
+            + cfg.L1 * math.sin(theta1)
+            + cfg.L2 * math.sin(phi12)
+            + cfg.L3 * math.sin(phi123)
+        )
+        x = reach * math.cos(theta0)
+        y = reach * math.sin(theta0)
 
-    # ── All joint positions (for visualisation / debugging) ───────────────────
-    def all_joint_positions(
+        return x, y, z, phi123
+
+    # ── 3-D Inverse kinematics ────────────────────────────────────────────────
+
+    def inverse_kinematics_3d(
         self,
+        x_target: float,
+        y_target: float,
+        z_target: float,
+        phi_arm: float = 0.0,
+        elbow_up: bool = True,
+    ) -> tuple[float, float, float, float] | None:
+        """
+        3-D IK via base-decoupling + wrist-decoupling + law of cosines.
+
+        Algorithm:
+          1. θ₀ = atan2(y, x)               — base points at target
+          2. r   = √(x² + y²)               — horizontal reach
+          3. Wrist-decouple in arm plane
+             (φ_arm = desired wrist orientation in the arm plane)::
+
+               wx = r   − L3·cos(φ_arm)
+               wz = (z − base_height) − L3·sin(φ_arm)
+
+          4. 2R IK for (wx, wz) via law of cosines::
+
+               cos θ₂ = (rw² − L1² − L2²) / (2·L1·L2)
+               θ₁     = atan2(wz, wx) − atan2(L2·sin θ₂, L1+L2·cos θ₂)
+
+          5. θ₃ = φ_arm − θ₁ − θ₂
+
+        Args:
+            x_target, y_target, z_target : world-frame target (mm)
+            phi_arm                       : desired arm-plane wrist orientation (rad)
+                                            0 = wrist horizontal, + = pitch up
+            elbow_up                      : True → positive θ₂ (elbow above line)
+
+        Returns:
+            (θ₀, θ₁, θ₂, θ₃) in radians, or None if unreachable / out of limits.
+        """
+        cfg = self.cfg
+
+        # Step 1 — base rotation
+        theta0 = math.atan2(y_target, x_target)
+
+        # Step 2 — horizontal reach and arm-plane height
+        r   = math.hypot(x_target, y_target)
+        z_s = z_target - cfg.base_height   # height above shoulder pivot
+
+        # Step 3 — wrist decoupling
+        wx = r   - cfg.L3 * math.cos(phi_arm)
+        wz = z_s - cfg.L3 * math.sin(phi_arm)
+        rw = math.hypot(wx, wz)
+
+        # Reachability check for the 2R sub-chain
+        max_reach = cfg.L1 + cfg.L2
+        min_reach = abs(cfg.L1 - cfg.L2)
+        if rw > max_reach or rw < min_reach:
+            return None
+
+        # Step 4 — law of cosines
+        cos_t2 = (rw**2 - cfg.L1**2 - cfg.L2**2) / (2.0 * cfg.L1 * cfg.L2)
+        cos_t2 = max(-1.0, min(1.0, cos_t2))   # clamp for numerical safety
+        theta2 = math.acos(cos_t2) if elbow_up else -math.acos(cos_t2)
+
+        theta1 = math.atan2(wz, wx) - math.atan2(
+            cfg.L2 * math.sin(theta2),
+            cfg.L1 + cfg.L2 * math.cos(theta2),
+        )
+
+        # Step 5 — wrist pitch
+        theta3 = phi_arm - theta1 - theta2
+
+        # Joint-limit check (base, shoulder, elbow, wrist_pitch)
+        angles = (theta0, theta1, theta2, theta3)
+        for ang, (lo, hi) in zip(angles, cfg.kinematic_joint_limits):
+            wrapped = (ang + math.pi) % (2.0 * math.pi) - math.pi
+            if not (lo <= wrapped <= hi):
+                return None
+
+        return theta0, theta1, theta2, theta3
+
+    # ── 3-D joint positions (for visualisation / debugging) ──────────────────
+
+    def all_joint_positions_3d(
+        self,
+        theta0: float,
         theta1: float,
         theta2: float,
         theta3: float,
     ) -> np.ndarray:
         """
-        World-frame (x, y) of every joint origin.
+        World-frame (x, y, z) of every joint origin.
 
-        Mirrors compute_all_joint_positions() from the ABB analysis.
-
-        Returns:
-            (4, 2) array — [shoulder, elbow, wrist, tip]  (mm)
+        Returns
+        -------
+        (5, 3) ndarray — rows: [base, shoulder, elbow, wrist, tip]  (mm)
         """
         cfg = self.cfg
-        dh_table = [
-            (theta1, 0.0, cfg.L1, 0.0),
-            (theta2, 0.0, cfg.L2, 0.0),
-            (theta3, 0.0, cfg.L3, 0.0),
+        c0, s0 = math.cos(theta0), math.sin(theta0)
+
+        def to_world(reach: float, height: float) -> list:
+            return [reach * c0, reach * s0, height]
+
+        pts = [
+            [0.0, 0.0, 0.0],                       # base  (frame surface)
+            [0.0, 0.0, cfg.base_height],            # shoulder pivot
         ]
-        positions = [[0.0, cfg.base_height]]   # shoulder pivot in world frame
-        T_accum = np.eye(4)
-        for row in dh_table:
-            T_accum = T_accum @ dh_matrix(*row)
-            positions.append([T_accum[0, 3], T_accum[1, 3] + cfg.base_height])
-        return np.array(positions)
 
-    # ── Inverse kinematics ────────────────────────────────────────────────────
-    def inverse_kinematics(
+        phi12  = theta1 + theta2
+        phi123 = phi12  + theta3
+
+        r1 = cfg.L1 * math.cos(theta1)
+        z1 = cfg.base_height + cfg.L1 * math.sin(theta1)
+        pts.append(to_world(r1, z1))               # elbow
+
+        r2 = r1 + cfg.L2 * math.cos(phi12)
+        z2 = z1 + cfg.L2 * math.sin(phi12)
+        pts.append(to_world(r2, z2))               # wrist
+
+        r3 = r2 + cfg.L3 * math.cos(phi123)
+        z3 = z2 + cfg.L3 * math.sin(phi123)
+        pts.append(to_world(r3, z3))               # gripper tip
+
+        return np.array(pts)
+
+    # ── IK validation ─────────────────────────────────────────────────────────
+
+    def validate_ik_3d(
         self,
-        x_target: float,
-        y_target: float,
-        phi: float = 0.0,
-        elbow_up: bool = True,
-    ) -> tuple[float, float, float] | None:
-        """
-        2-D planar IK using wrist-decoupling + law of cosines.
-
-        Algorithm (adapted from ABB ik_2d_planar):
-          1. Fix end-effector orientation to phi.
-          2. Back-project to wrist-pivot (world frame → shoulder frame):
-                 wx = x_target − L3·cos(phi)
-                 wy = (y_target − base_height) − L3·sin(phi)
-          3. Solve 2R sub-problem with law of cosines (same as ABB):
-                 cos θ₂ = (r² − L1² − L2²) / (2·L1·L2)
-                 θ₁     = atan2(wy,wx) − atan2(L2·sin θ₂, L1+L2·cos θ₂)
-          4. Recover θ₃ = phi − θ₁ − θ₂.
-
-        Args:
-            x_target, y_target : world-frame target (mm)
-            phi                : desired end-effector orientation (rad)
-            elbow_up           : True → positive θ₂
-
-        Returns:
-            (theta1, theta2, theta3) rad, or None if unreachable / out of limits
-        """
-        cfg = self.cfg
-
-        # Convert world frame → shoulder frame (subtract base height)
-        ys = y_target - cfg.base_height
-
-        # Wrist pivot position in shoulder frame
-        wx = x_target - cfg.L3 * math.cos(phi)
-        wy = ys        - cfg.L3 * math.sin(phi)
-        r  = math.hypot(wx, wy)
-
-        # Reachability check (mirrors ABB warning)
-        if r > (cfg.L1 + cfg.L2) or r < abs(cfg.L1 - cfg.L2):
-            return None
-
-        # 2R IK — law of cosines (same as ABB ik_2d_planar)
-        cos_t2 = (r**2 - cfg.L1**2 - cfg.L2**2) / (2.0 * cfg.L1 * cfg.L2)
-        cos_t2 = max(-1.0, min(1.0, cos_t2))
-        theta2 = math.acos(cos_t2) if elbow_up else -math.acos(cos_t2)
-
-        theta1 = math.atan2(wy, wx) - math.atan2(
-            cfg.L2 * math.sin(theta2),
-            cfg.L1 + cfg.L2 * math.cos(theta2),
-        )
-
-        theta3 = phi - theta1 - theta2
-
-        # Joint-limit check
-        for ang, (lo, hi) in zip((theta1, theta2, theta3), cfg.joint_limits):
-            wrapped = (ang + math.pi) % (2.0 * math.pi) - math.pi
-            if not (lo <= wrapped <= hi):
-                return None
-
-        return theta1, theta2, theta3
-
-    # ── Validation (FK round-trip, mirrors ABB validate_ik_solution) ──────────
-    def validate_ik(
-        self,
+        theta0: float,
         theta1: float,
         theta2: float,
         theta3: float,
         x_target: float,
         y_target: float,
+        z_target: float,
     ) -> float:
+        """3-D Euclidean position error (mm) of an IK solution."""
+        x, y, z, _ = self.forward_kinematics_3d(theta0, theta1, theta2, theta3)
+        return math.sqrt(
+            (x_target - x) ** 2 + (y_target - y) ** 2 + (z_target - z) ** 2
+        )
+
+    # ── Dynamixel encoder conversion ──────────────────────────────────────────
+
+    def dxl_rad_to_count(self, angle_rad: float) -> int:
         """
-        Position error (mm) of an IK solution.  Mirrors ABB validate_ik_solution().
-        Both target and FK result are in the world frame.
+        Convert radians to XM540 encoder counts, clamped to config limits.
+
+        0 rad → dxl_position_neutral (2048)
+        +π rad → 2048 + 2048 = 4096 (clamped to 4095)
+        −π rad → 2048 − 2048 = 0
         """
-        x_fk, y_fk, _, _ = self.forward_kinematics(theta1, theta2, theta3)
-        return math.hypot(x_target - x_fk, y_target - y_fk)
-
-    # ── Encoder conversion ────────────────────────────────────────────────────
-    def angle_to_position(self, angle_rad: float) -> int:
         cfg = self.cfg
-        pos = int(round(cfg.position_neutral + angle_rad * cfg.counts_per_rad))
-        return max(cfg.min_position, min(cfg.max_position, pos))
+        count = int(round(cfg.dxl_position_neutral + angle_rad * cfg.dxl_counts_per_rad))
+        return max(cfg.dxl_min_position, min(cfg.dxl_max_position, count))
 
-    def position_to_angle(self, position: int) -> float:
+    def dxl_count_to_rad(self, count: int) -> float:
+        """Convert XM540 encoder counts to radians."""
         cfg = self.cfg
-        return (int(position) - cfg.position_neutral) / cfg.counts_per_rad
+        return (int(count) - cfg.dxl_position_neutral) / cfg.dxl_counts_per_rad
 
-    def joint_angles_to_positions(
-        self, theta1: float, theta2: float, theta3: float
+    def dxl_angles_to_counts(
+        self,
+        wrist_pitch: float,
+        wrist_spin: float,
+        gripper: float,
     ) -> tuple[int, int, int]:
-        """(shoulder, elbow, wrist) angles → Dynamixel encoder counts."""
+        """Convert the three Dynamixel joint angles (rad) → encoder counts."""
         return (
-            self.angle_to_position(theta1),
-            self.angle_to_position(theta2),
-            self.angle_to_position(theta3),
+            self.dxl_rad_to_count(wrist_pitch),
+            self.dxl_rad_to_count(wrist_spin),
+            self.dxl_rad_to_count(gripper),
         )
 
-    def positions_to_joint_angles(
-        self, pos_shoulder: int, pos_elbow: int, pos_wrist: int
+    def dxl_counts_to_angles(
+        self,
+        count_wp: int,
+        count_ws: int,
+        count_gr: int,
     ) -> tuple[float, float, float]:
-        """Dynamixel encoder counts → (shoulder, elbow, wrist) angles (rad)."""
+        """Convert Dynamixel counts → (wrist_pitch, wrist_spin, gripper) rad."""
         return (
-            self.position_to_angle(pos_shoulder),
-            self.position_to_angle(pos_elbow),
-            self.position_to_angle(pos_wrist),
+            self.dxl_count_to_rad(count_wp),
+            self.dxl_count_to_rad(count_ws),
+            self.dxl_count_to_rad(count_gr),
         )
 
-    # ── Workspace sampling (mirrors ABB workspace analysis) ───────────────────
-    def sample_workspace(self, n_samples: int = 500, seed: int = 42) -> np.ndarray:
-        """
-        Random FK samples → end-effector positions.  Mirrors ABB workspace block.
+    # ── Workspace sampling ────────────────────────────────────────────────────
 
-        Returns:
-            (n_samples, 2) array of [x, y] world-frame positions (mm)
+    def sample_workspace_3d(
+        self, n_samples: int = 2000, seed: int = 42
+    ) -> np.ndarray:
+        """
+        Random FK samples → end-effector positions in 3-D world frame.
+
+        Returns (n_samples, 3) array of [x, y, z] (mm).
         """
         cfg = self.cfg
         rng = np.random.default_rng(seed)
-        limits = cfg.joint_limits
-        points = []
+        limits = cfg.kinematic_joint_limits
+        points: list[list[float]] = []
         for _ in range(n_samples):
-            t1 = rng.uniform(*limits[0])
-            t2 = rng.uniform(*limits[1])
-            t3 = rng.uniform(*limits[2])
-            x, y, _, _ = self.forward_kinematics(t1, t2, t3)
-            points.append([x, y])
+            t0 = rng.uniform(*limits[0])
+            t1 = rng.uniform(*limits[1])
+            t2 = rng.uniform(*limits[2])
+            t3 = rng.uniform(*limits[3])
+            x, y, z, _ = self.forward_kinematics_3d(t0, t1, t2, t3)
+            points.append([x, y, z])
         return np.array(points)
